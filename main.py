@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from src.agent.design_agent import DesignAgent, DesignAgentError
+from src.agent.design_agent import (
+    DesignAgent,
+    DesignAgentError,
+)
+from src.knowledge.knowledge_builder import KnowledgeBuilder
 from src.research.web_researcher import (
     WebResearchError,
     WebResearcher,
@@ -54,8 +58,25 @@ def main() -> None:
         print(f"\nERROR DE INVESTIGACIÓN: {exc}")
         return
 
-    print("\nInforme técnico de Model-IA:\n")
+    print("\n========================================")
+    print("INFORME TÉCNICO")
+    print("========================================\n")
+
     print_json(research_report.model_dump())
+
+    try:
+        builder = KnowledgeBuilder()
+        engineering_knowledge = builder.build(research_report)
+
+    except Exception as exc:
+        print(f"\nERROR GENERANDO ENGINEERING KNOWLEDGE: {exc}")
+        return
+
+    print("\n========================================")
+    print("ENGINEERING KNOWLEDGE")
+    print("========================================\n")
+
+    print_json(engineering_knowledge.model_dump())
 
 
 if __name__ == "__main__":
