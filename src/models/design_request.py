@@ -2,62 +2,72 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
-
-
-class Dimension(BaseModel):
-    """Dimensión indicada expresamente por el usuario."""
-
-    name: str = Field(
-        description="Nombre de la dimensión: ancho, alto, largo, diámetro, etc."
-    )
-
-    value_mm: float = Field(
-        description="Valor convertido a milímetros"
-    )
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IdentifiedObject(BaseModel):
-    """Objeto físico real mencionado en la petición."""
+    """Objeto físico o producto detectado en la petición."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
-        description="Nombre concreto del objeto físico o producto"
+        description="Nombre común del objeto o producto.",
     )
 
     manufacturer: str | None = Field(
-        description="Fabricante identificado o null"
+        description=(
+            "Fabricante indicado o identificado. Debe ser null cuando "
+            "no se conozca."
+        ),
     )
 
     model: str | None = Field(
-        description="Modelo exacto identificado o null"
+        description=(
+            "Modelo exacto indicado o identificado. Debe ser null cuando "
+            "no se conozca."
+        ),
     )
 
     object_type: str = Field(
-        description="Tipo general del objeto"
-    )
-
-    role: Literal[
-        "design_subject",
-        "installation_context",
-        "reference_object",
-    ] = Field(
         description=(
-            "design_subject: objeto para el que se diseña; "
-            "installation_context: objeto donde se instalará; "
-            "reference_object: objeto usado como referencia"
-        )
+            "Tipo general del objeto: ordenador, mando, pantalla, caja, "
+            "placa, soporte, pieza mecánica, etc."
+        ),
     )
 
     requires_web_research: bool = Field(
-        description="Indica si deben investigarse datos técnicos del objeto"
+        description=(
+            "Indica si es necesario investigar datos técnicos del objeto "
+            "en Internet."
+        ),
+    )
+
+
+class ExplicitDimension(BaseModel):
+    """Dimensión explícita indicada por el usuario."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        description=(
+            "Nombre normalizado de la dimensión, por ejemplo width, depth, "
+            "height, diameter o wall_thickness."
+        ),
+    )
+
+    value_mm: float = Field(
+        gt=0,
+        description="Valor de la dimensión expresado en milímetros.",
     )
 
 
 class DesignRequest(BaseModel):
-    """Interpretación estructurada de una petición de diseño."""
+    """Interpretación estructurada de la petición del usuario."""
+
+    model_config = ConfigDict(extra="forbid")
 
     original_request: str = Field(
-        description="Petición original completa del usuario"
+        description="Petición original completa del usuario.",
     )
 
     design_intent: Literal[
@@ -71,52 +81,60 @@ class DesignRequest(BaseModel):
         "mechanical_part",
         "unknown",
     ] = Field(
-        description="Intención mecánica principal"
+        description="Intención mecánica principal de la petición.",
     )
 
     requested_output: list[
         Literal["STEP", "STL", "3MF"]
     ] = Field(
-        description=(
-            "Formatos solicitados. Si el usuario no especifica ninguno, "
-            "debe contener STEP, STL y 3MF"
-        )
+        description="Formatos CAD que deben generarse.",
     )
 
     identified_objects: list[IdentifiedObject] = Field(
-        description="Objetos físicos reales mencionados"
+        description="Objetos físicos identificados en la petición.",
     )
 
-    explicit_dimensions: list[Dimension] = Field(
-        description="Dimensiones indicadas expresamente por el usuario"
+    explicit_dimensions_mm: list[ExplicitDimension] = Field(
+        description=(
+            "Dimensiones explícitas indicadas por el usuario, expresadas "
+            "como una lista de nombre y valor en milímetros."
+        ),
     )
 
     explicit_requirements: list[str] = Field(
-        description="Requisitos expresamente indicados"
+        description=(
+            "Requisitos explícitos de diseño, fabricación, montaje o uso."
+        ),
     )
 
     web_research_required: bool = Field(
-        description="Indica si la petición requiere investigación web"
+        description=(
+            "Indica si hace falta investigación web antes de diseñar."
+        ),
     )
 
     information_to_research: list[str] = Field(
-        description="Información técnica objetiva que debe investigarse"
+        description=(
+            "Información técnica concreta que debe investigarse."
+        ),
     )
 
     missing_user_decisions: list[str] = Field(
         description=(
-            "Solo decisiones subjetivas imprescindibles que no puedan "
-            "investigarse ni resolverse mediante criterio de ingeniería"
-        )
+            "Decisiones relevantes que todavía tendría que tomar el usuario."
+        ),
     )
 
     interpretation_summary: str = Field(
-        description="Resumen preciso de la interpretación"
+        description=(
+            "Resumen técnico breve y preciso de la petición interpretada."
+        ),
     )
 
-    @model_validator(mode="after")
-    def ensure_default_outputs(self) -> "DesignRequest":
-        if not self.requested_output:
-            self.requested_output = ["STEP", "STL", "3MF"]
+    def dimensions_as_dict(self) -> dict[str, float]:
+        """Devuelve las dimensiones como diccionario para uso interno."""
 
-        return self
+        return {
+            dimension.name: dimension.value_mm
+            for dimension in self.explicit_dimensions_mm
+        }
