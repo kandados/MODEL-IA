@@ -1,0 +1,6 @@
+openai
+python-dotenv
+pydantic
+httpx
+beautifulsoup4
+lxml
