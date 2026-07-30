@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import re
-
 import cadquery as cq
 
+from src.cad.enclosure_specification import EnclosureSpecification
 from src.cad.geometry_primitives import GeometryPrimitives
 from src.models.mechanical_plan import MechanicalPlan
 
@@ -12,14 +11,9 @@ class EnclosureBuilder:
     """
     Genera una carcasa formada por una base hueca y una tapa independiente.
 
-    La cavidad interior se crea mediante una operación booleana de corte.
-    No se utiliza Workplane.shell(), ya que OpenCascade puede fallar al
-    engrosar o vaciar sólidos redondeados.
+    La clase no mantiene parámetros geométricos propios. Todos los valores
+    compartidos se obtienen mediante EnclosureSpecification.
     """
-
-    DEFAULT_WALL_THICKNESS = 2.0
-    DEFAULT_CORNER_RADIUS = 2.0
-    BASE_HEIGHT_RATIO = 0.60
 
     BOOLEAN_TOLERANCE = 0.10
 
@@ -27,123 +21,42 @@ class EnclosureBuilder:
         self,
         plan: MechanicalPlan,
     ) -> cq.Workplane:
-        """
-        Construye una carcasa hueca completa abierta por arriba.
-
-        Este método se conserva como operación genérica. Para la exportación
-        final deben utilizarse build_base() y build_lid().
-        """
-
-        box = self._get_bounding_box(plan)
-        wall_thickness = self._resolve_wall_thickness(plan)
-
-        self._validate_dimensions(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=box.height_mm,
-            wall_thickness_mm=wall_thickness,
-        )
+        specification = EnclosureSpecification.from_plan(plan)
 
         return self._build_open_container(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=box.height_mm,
-            wall_thickness_mm=wall_thickness,
-            corner_radius_mm=self.DEFAULT_CORNER_RADIUS,
+            width_mm=specification.external_box.width_mm,
+            depth_mm=specification.external_box.depth_mm,
+            height_mm=specification.external_box.height_mm,
+            wall_thickness_mm=specification.wall_thickness_mm,
+            corner_radius_mm=specification.corner_radius_mm,
         )
 
     def build_base(
         self,
         plan: MechanicalPlan,
     ) -> cq.Workplane:
-        """
-        Construye la parte inferior de la carcasa.
-
-        La base dispone de:
-
-        - suelo;
-        - cuatro paredes;
-        - abertura superior;
-        - esquinas exteriores redondeadas.
-        """
-
-        box = self._get_bounding_box(plan)
-        wall_thickness = self._resolve_wall_thickness(plan)
-
-        self._validate_dimensions(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=box.height_mm,
-            wall_thickness_mm=wall_thickness,
-        )
-
-        base_height = (
-            box.height_mm
-            * self.BASE_HEIGHT_RATIO
-        )
-
-        if base_height <= wall_thickness:
-            raise ValueError(
-                "La altura calculada para la base no permite crear "
-                "un suelo con el grosor solicitado."
-            )
+        specification = EnclosureSpecification.from_plan(plan)
 
         return self._build_open_container(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=base_height,
-            wall_thickness_mm=wall_thickness,
-            corner_radius_mm=self.DEFAULT_CORNER_RADIUS,
+            width_mm=specification.external_box.width_mm,
+            depth_mm=specification.external_box.depth_mm,
+            height_mm=specification.base_height_mm,
+            wall_thickness_mm=specification.wall_thickness_mm,
+            corner_radius_mm=specification.corner_radius_mm,
         )
 
     def build_lid(
         self,
         plan: MechanicalPlan,
     ) -> cq.Workplane:
-        """
-        Construye una tapa independiente.
-
-        La tapa se genera apoyada sobre el plano XY para facilitar:
-
-        - la visualización;
-        - la validación;
-        - la exportación;
-        - la impresión 3D.
-
-        Su cavidad se abre por la parte inferior, dejando una superficie
-        superior cerrada.
-        """
-
-        box = self._get_bounding_box(plan)
-        wall_thickness = self._resolve_wall_thickness(plan)
-
-        self._validate_dimensions(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=box.height_mm,
-            wall_thickness_mm=wall_thickness,
-        )
-
-        lid_height = (
-            box.height_mm
-            * (
-                1.0
-                - self.BASE_HEIGHT_RATIO
-            )
-        )
-
-        if lid_height <= wall_thickness:
-            raise ValueError(
-                "La altura calculada para la tapa no permite crear "
-                "un techo con el grosor solicitado."
-            )
+        specification = EnclosureSpecification.from_plan(plan)
 
         return self._build_downward_open_lid(
-            width_mm=box.width_mm,
-            depth_mm=box.depth_mm,
-            height_mm=lid_height,
-            wall_thickness_mm=wall_thickness,
-            corner_radius_mm=self.DEFAULT_CORNER_RADIUS,
+            width_mm=specification.external_box.width_mm,
+            depth_mm=specification.external_box.depth_mm,
+            height_mm=specification.lid_height_mm,
+            wall_thickness_mm=specification.wall_thickness_mm,
+            corner_radius_mm=specification.corner_radius_mm,
         )
 
     def _build_open_container(
@@ -154,10 +67,6 @@ class EnclosureBuilder:
         wall_thickness_mm: float,
         corner_radius_mm: float,
     ) -> cq.Workplane:
-        """
-        Construye un recipiente abierto por arriba mediante resta booleana.
-        """
-
         outer_radius = self._calculate_safe_corner_radius(
             width_mm=width_mm,
             depth_mm=depth_mm,
@@ -171,15 +80,8 @@ class EnclosureBuilder:
             corner_radius_mm=outer_radius,
         )
 
-        inner_width = (
-            width_mm
-            - 2.0 * wall_thickness_mm
-        )
-
-        inner_depth = (
-            depth_mm
-            - 2.0 * wall_thickness_mm
-        )
+        inner_width = width_mm - 2.0 * wall_thickness_mm
+        inner_depth = depth_mm - 2.0 * wall_thickness_mm
 
         inner_height = (
             height_mm
@@ -226,13 +128,6 @@ class EnclosureBuilder:
         wall_thickness_mm: float,
         corner_radius_mm: float,
     ) -> cq.Workplane:
-        """
-        Construye una tapa abierta por la cara inferior.
-
-        La cavidad comienza ligeramente por debajo de Z=0 para garantizar
-        que atraviese completamente la cara inferior durante el corte.
-        """
-
         outer_radius = self._calculate_safe_corner_radius(
             width_mm=width_mm,
             depth_mm=depth_mm,
@@ -246,15 +141,8 @@ class EnclosureBuilder:
             corner_radius_mm=outer_radius,
         )
 
-        inner_width = (
-            width_mm
-            - 2.0 * wall_thickness_mm
-        )
-
-        inner_depth = (
-            depth_mm
-            - 2.0 * wall_thickness_mm
-        )
+        inner_width = width_mm - 2.0 * wall_thickness_mm
+        inner_depth = depth_mm - 2.0 * wall_thickness_mm
 
         inner_height = (
             height_mm
@@ -300,13 +188,6 @@ class EnclosureBuilder:
         height_mm: float,
         corner_radius_mm: float,
     ) -> cq.Workplane:
-        """
-        Construye una caja y redondea únicamente las aristas verticales.
-
-        El filete se aplica antes de cualquier resta booleana para mantener
-        una topología sencilla y predecible.
-        """
-
         body = GeometryPrimitives.box(
             width_mm=width_mm,
             depth_mm=depth_mm,
@@ -322,79 +203,18 @@ class EnclosureBuilder:
             edge_selector="|Z",
         )
 
-    def _resolve_wall_thickness(
-        self,
-        plan: MechanicalPlan,
-    ) -> float:
-        """
-        Busca el grosor de pared dentro de las reglas del MechanicalPlan.
-        """
-
-        patterns = (
-            r"wall_thickness\s*=\s*([0-9]+(?:[.,][0-9]+)?)",
-            r"wall thickness\s*=\s*([0-9]+(?:[.,][0-9]+)?)",
-            r"grosor(?:\s+de)?\s+pared(?:es)?\s*=\s*"
-            r"([0-9]+(?:[.,][0-9]+)?)",
-        )
-
-        for rule in plan.validation_rules:
-            normalized = rule.strip().lower()
-
-            for pattern in patterns:
-                match = re.search(
-                    pattern,
-                    normalized,
-                )
-
-                if match is None:
-                    continue
-
-                value_text = (
-                    match
-                    .group(1)
-                    .replace(",", ".")
-                )
-
-                try:
-                    value = float(value_text)
-                except ValueError:
-                    continue
-
-                if value > 0:
-                    return value
-
-        return self.DEFAULT_WALL_THICKNESS
-
-    @staticmethod
-    def _get_bounding_box(
-        plan: MechanicalPlan,
-    ):
-        if plan.external_bounding_box is None:
-            raise ValueError(
-                "MechanicalPlan no contiene dimensiones exteriores."
-            )
-
-        return plan.external_bounding_box
-
     @staticmethod
     def _calculate_safe_corner_radius(
         width_mm: float,
         depth_mm: float,
         requested_radius_mm: float,
     ) -> float:
-        """
-        Limita el radio exterior para evitar filetes degenerados.
-        """
-
         shortest_side = min(
             width_mm,
             depth_mm,
         )
 
-        maximum_radius = (
-            shortest_side
-            * 0.20
-        )
+        maximum_radius = shortest_side * 0.20
 
         return max(
             0.0,
@@ -411,15 +231,9 @@ class EnclosureBuilder:
         inner_width_mm: float,
         inner_depth_mm: float,
     ) -> float:
-        """
-        Calcula el radio interior manteniendo un grosor aproximadamente
-        uniforme en las esquinas.
-        """
-
         desired_radius = max(
             0.0,
-            outer_radius_mm
-            - wall_thickness_mm,
+            outer_radius_mm - wall_thickness_mm,
         )
 
         maximum_radius = (
@@ -436,58 +250,10 @@ class EnclosureBuilder:
         )
 
     @staticmethod
-    def _validate_dimensions(
-        width_mm: float,
-        depth_mm: float,
-        height_mm: float,
-        wall_thickness_mm: float,
-    ) -> None:
-        dimensions = {
-            "width_mm": width_mm,
-            "depth_mm": depth_mm,
-            "height_mm": height_mm,
-            "wall_thickness_mm": wall_thickness_mm,
-        }
-
-        for name, value in dimensions.items():
-            if value <= 0:
-                raise ValueError(
-                    f"{name} debe ser mayor que cero. "
-                    f"Valor recibido: {value}"
-                )
-
-        minimum_horizontal_dimension = (
-            wall_thickness_mm
-            * 2.0
-        )
-
-        if width_mm <= minimum_horizontal_dimension:
-            raise ValueError(
-                "El ancho exterior no permite aplicar el grosor "
-                "de pared solicitado."
-            )
-
-        if depth_mm <= minimum_horizontal_dimension:
-            raise ValueError(
-                "La profundidad exterior no permite aplicar el grosor "
-                "de pared solicitado."
-            )
-
-        if height_mm <= wall_thickness_mm:
-            raise ValueError(
-                "La altura exterior no permite aplicar el grosor "
-                "de pared solicitado."
-            )
-
-    @staticmethod
     def _validate_resulting_solid(
         body: cq.Workplane,
         operation_name: str,
     ) -> None:
-        """
-        Comprueba que la operación booleana produjo un único sólido válido.
-        """
-
         solid_count = body.solids().size()
 
         if solid_count != 1:
