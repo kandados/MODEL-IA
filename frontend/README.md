@@ -1,0 +1,187 @@
+# Model-IA Desktop
+
+Interfaz local de Model-IA construida con React, TypeScript, Electron y
+Three.js.
+
+## Desarrollo
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Verificación
+
+```bash
+npm run typecheck
+npm run build
+```
+
+## Empaquetado
+
+```bash
+npm run package
+```
+
+`package` genera la aplicación desempaquetada para el sistema actual.
+`npm run dist` generará el instalador configurado para macOS, Windows o Linux.
+
+## Persistencia local
+
+Electron conserva automáticamente un espacio de trabajo independiente de los
+archivos del repositorio. Cada proyecto recuerda:
+
+- borrador de la petición;
+- historial de conversación;
+- referencias adjuntas;
+- resultado, validaciones y exportaciones disponibles;
+- etapa del pipeline y fecha de la última modificación.
+
+Los adjuntos se seleccionan mediante el diálogo nativo del sistema y se copian
+a la carpeta privada de datos de Model-IA. El proceso React nunca recibe rutas
+absolutas del ordenador: únicamente identificadores y metadatos seguros a
+través del `preload` de Electron. Al pulsar el nombre de un adjunto, Electron
+abre la copia guardada con la aplicación predeterminada del sistema.
+
+En macOS, la carpeta se encuentra bajo `~/Library/Application Support/`; en
+Windows, bajo `%APPDATA%`; y en Linux, bajo `~/.config`. Electron elige el
+subdirectorio exacto de Model-IA en cada plataforma.
+
+## Frontera con el backend
+
+React no importa código Python ni conoce CadQuery. Toda comunicación pasa por
+la interfaz `ModelIAClient` situada en:
+
+`src/renderer/src/model-ia-client.ts`
+
+`AdaptiveModelIAClient` comprueba si FastAPI está disponible. Cuando responde,
+usa el cliente HTTP/WebSocket real; cuando no responde, activa el simulador y
+la interfaz lo indica como `Modo demostración`. La URL predeterminada es:
+
+```text
+http://127.0.0.1:8000/api/v1
+```
+
+Puede cambiarse en desarrollo mediante `VITE_MODEL_IA_API_URL`.
+
+## Contrato API v1
+
+### Estado
+
+```http
+GET /api/v1/health
+```
+
+Debe responder con HTTP 200. El contenido JSON puede incluir información
+adicional; el frontend solo necesita el estado HTTP.
+
+### Iniciar una generación
+
+```http
+POST /api/v1/generations
+Content-Type: application/json
+```
+
+```json
+{
+  "project_id": "mac-mini-case",
+  "message": "Diseña una carcasa funcional",
+  "attachment_names": [],
+  "requested_formats": ["STEP", "STL", "3MF"]
+}
+```
+
+El backend puede devolver directamente el resultado final o aceptar un trabajo
+asíncrono:
+
+```json
+{
+  "generation_id": "gen_123",
+  "websocket_url": "/api/v1/generations/gen_123/events"
+}
+```
+
+### Progreso WebSocket
+
+Cada mensaje es JSON. Los eventos de progreso usan uno de los cuatro estados
+visuales (`interpret`, `design`, `validate`, `export`):
+
+```json
+{
+  "type": "progress",
+  "stage": "design",
+  "stage_index": 1,
+  "progress": 0.45,
+  "message": "Construyendo el diseño paramétrico"
+}
+```
+
+También se reconocen estados internos del pipeline como `research`,
+`knowledge`, `plan` y `cad`, que el cliente agrupa automáticamente en los
+cuatro estados visuales.
+
+El último evento contiene el resultado:
+
+```json
+{
+  "type": "completed",
+  "result": {
+    "project_id": "mac-mini-case",
+    "status": "completed",
+    "specification": {
+      "dimensions": {
+        "width_mm": 210,
+        "depth_mm": 210,
+        "height_mm": 52
+      },
+      "material": "PETG",
+      "tolerance_mm": 0.5
+    },
+    "validations": [
+      {
+        "id": "closed_geometry",
+        "label": "Geometría correcta",
+        "status": "passed"
+      }
+    ],
+    "artifacts": [
+      {
+        "format": "STL",
+        "file_name": "enclosure.stl",
+        "available": true,
+        "download_url": "/api/v1/generations/gen_123/files/enclosure.stl"
+      }
+    ],
+    "preview": {
+      "format": "STL",
+      "url": "/api/v1/generations/gen_123/files/enclosure.stl"
+    }
+  }
+}
+```
+
+El frontend usa el STL real como vista previa y los enlaces de los artefactos
+para descargar STEP, STL y 3MF. FastAPI debe permitir CORS desde el servidor de
+desarrollo de Vite (`http://localhost:5173`) y desde la aplicación Electron.
+
+## Estado actual del frontend
+
+- Ventana Electron con aislamiento de contexto.
+- Pantalla principal basada en el mockup aprobado.
+- Lista local de proyectos.
+- Visor Three.js interactivo.
+- Vista normal y explosionada.
+- Controles de cámara, rotación y pantalla completa.
+- Cliente adaptativo: FastAPI/WebSocket real con simulador de respaldo.
+- Carga automática del STL generado en el visor Three.js.
+- Descarga real de STEP, STL y 3MF cuando el backend proporciona sus URL.
+- Persistencia local de proyectos y borradores entre reinicios.
+- Renombrado y eliminación segura de proyectos y sus adjuntos locales.
+- Historial de conversación independiente por proyecto.
+- Adjuntos locales reales con apertura y eliminación segura.
+- Especificaciones, validaciones y formatos de salida.
+
+La transferencia del contenido de los adjuntos a FastAPI sigue pendiente; el
+contrato actual envía sus nombres. El backend Python existente no ha sido
+modificado.
