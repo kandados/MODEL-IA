@@ -57,8 +57,20 @@ const cloneResult = (
     dimensions: { ...source.specification.dimensions },
   },
   validations: source.validations.map((validation) => ({ ...validation })),
-  artifacts: source.artifacts.map((artifact) => ({ ...artifact })),
-  preview: source.preview ? { ...source.preview } : undefined,
+  artifacts: source.artifacts.map((artifact) => ({
+    ...artifact,
+    files: artifact.files?.map((file) => ({ ...file })),
+  })),
+  preview: source.preview
+    ? {
+        ...source.preview,
+        parts: source.preview.parts?.map((part) => ({
+          ...part,
+          assembledPositionMm: [...part.assembledPositionMm],
+          explodedPositionMm: [...part.explodedPositionMm],
+        })),
+      }
+    : undefined,
 });
 
 export const createEmptyResult = (projectId: string): GenerationResult => ({

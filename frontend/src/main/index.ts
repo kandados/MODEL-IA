@@ -21,7 +21,12 @@ import { basename, extname, join } from "node:path";
 
 const WORKSPACE_FILE_NAME = "workspace-v1.json";
 const MAX_WORKSPACE_BYTES = 5 * 1024 * 1024;
+const MAX_EXPORT_BYTES = 256 * 1024 * 1024;
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,100}$/;
+const GENERATION_FILE_PATH_PATTERN =
+  /^\/api\/v1\/generations\/gen_[a-f0-9]{32}\/files\/[a-zA-Z0-9._-]+$/;
+const LOCAL_API_HOSTS = new Set(["127.0.0.1", "localhost"]);
+const ALLOWED_EXPORT_EXTENSIONS = new Set([".3mf", ".step", ".stl"]);
 const ALLOWED_ATTACHMENT_EXTENSIONS = new Set([
   ".3mf",
   ".dxf",
@@ -51,6 +56,11 @@ const MIME_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
 };
+
+interface ExportFileRequest {
+  fileName: string;
+  downloadUrl: string;
+}
 
 app.setName("Model-IA");
 
@@ -88,6 +98,75 @@ const getParentWindow = (
   event: IpcMainInvokeEvent,
 ): BrowserWindow | undefined =>
   BrowserWindow.fromWebContents(event.sender) ?? undefined;
+
+const normalizeExportFiles = (value: unknown): ExportFileRequest[] => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
+    throw new Error("La exportación no contiene archivos válidos.");
+  }
+
+  return value.map((candidate) => {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      !("fileName" in candidate) ||
+      !("downloadUrl" in candidate) ||
+      typeof candidate.fileName !== "string" ||
+      typeof candidate.downloadUrl !== "string"
+    ) {
+      throw new Error("La información de exportación no es válida.");
+    }
+
+    const fileName = candidate.fileName.trim();
+    const extension = extname(fileName).toLowerCase();
+    if (
+      !fileName ||
+      basename(fileName) !== fileName ||
+      !ALLOWED_EXPORT_EXTENSIONS.has(extension)
+    ) {
+      throw new Error("El nombre del archivo de exportación no es válido.");
+    }
+
+    const downloadUrl = new URL(candidate.downloadUrl);
+    if (
+      downloadUrl.protocol !== "http:" ||
+      !LOCAL_API_HOSTS.has(downloadUrl.hostname) ||
+      downloadUrl.port !== "8000" ||
+      downloadUrl.username ||
+      downloadUrl.password ||
+      downloadUrl.search ||
+      downloadUrl.hash ||
+      !GENERATION_FILE_PATH_PATTERN.test(downloadUrl.pathname)
+    ) {
+      throw new Error("La dirección de descarga no pertenece a Model-IA.");
+    }
+
+    return {
+      fileName,
+      downloadUrl: downloadUrl.toString(),
+    };
+  });
+};
+
+const fetchExportFile = async (
+  exportFile: ExportFileRequest,
+): Promise<Buffer> => {
+  const response = await fetch(exportFile.downloadUrl);
+  if (!response.ok) {
+    throw new Error(`No se pudo descargar ${exportFile.fileName}.`);
+  }
+
+  const declaredSize = Number(response.headers.get("content-length") ?? 0);
+  if (declaredSize > MAX_EXPORT_BYTES) {
+    throw new Error(`${exportFile.fileName} supera el tamaño permitido.`);
+  }
+
+  const content = Buffer.from(await response.arrayBuffer());
+  if (content.byteLength > MAX_EXPORT_BYTES) {
+    throw new Error(`${exportFile.fileName} supera el tamaño permitido.`);
+  }
+
+  return content;
+};
 
 const registerDesktopHandlers = (): void => {
   ipcMain.handle("model-ia:workspace:load", async () => {
@@ -228,6 +307,63 @@ const registerDesktopHandlers = (): void => {
         force: true,
       });
       return true;
+    },
+  );
+
+  ipcMain.handle(
+    "model-ia:exports:save",
+    async (event, rawFiles: unknown) => {
+      const files = normalizeExportFiles(rawFiles);
+      const parentWindow = getParentWindow(event);
+
+      if (files.length === 1) {
+        const file = files[0];
+        const saveOptions = {
+          title: `Guardar ${extname(file.fileName).slice(1).toUpperCase()}`,
+          defaultPath: join(app.getPath("downloads"), file.fileName),
+        };
+        const selection = parentWindow
+          ? await dialog.showSaveDialog(parentWindow, saveOptions)
+          : await dialog.showSaveDialog(saveOptions);
+
+        if (selection.canceled || !selection.filePath) {
+          return { canceled: true, savedFileNames: [] };
+        }
+
+        await writeFile(selection.filePath, await fetchExportFile(file));
+        return {
+          canceled: false,
+          savedFileNames: [basename(selection.filePath)],
+        };
+      }
+
+      const directoryOptions: OpenDialogOptions = {
+        title: "Guardar las piezas STL",
+        buttonLabel: "Guardar aquí",
+        properties: ["openDirectory", "createDirectory", "promptToCreate"],
+      };
+      const selection = parentWindow
+        ? await dialog.showOpenDialog(parentWindow, directoryOptions)
+        : await dialog.showOpenDialog(directoryOptions);
+
+      if (selection.canceled || selection.filePaths.length === 0) {
+        return { canceled: true, savedFileNames: [] };
+      }
+
+      const contents: Buffer[] = [];
+      for (const file of files) {
+        contents.push(await fetchExportFile(file));
+      }
+
+      const targetDirectory = selection.filePaths[0];
+      for (const [index, file] of files.entries()) {
+        await writeFile(join(targetDirectory, file.fileName), contents[index]);
+      }
+
+      return {
+        canceled: false,
+        savedFileNames: files.map((file) => file.fileName),
+      };
     },
   );
 };

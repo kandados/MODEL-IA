@@ -45,17 +45,42 @@ class ExportManager:
 
     def export(
         self,
-        body: cq.Workplane | cq.Shape,
+        body: cq.Workplane | cq.Shape | cq.Assembly,
         file_name: str,
         formats: Iterable[str] = SUPPORTED_FORMATS,
         output_directory: str | Path | None = None,
     ) -> ExportResult:
-        shape = self._extract_shape(body)
         safe_name = self._sanitize_file_name(file_name)
         target_directory = self._prepare_directory(output_directory)
 
-        requested_formats = self._normalize_formats(formats)
+        requested_formats = self.normalize_formats(formats)
         exported_files: list[ExportedFile] = []
+
+        if isinstance(body, cq.Assembly):
+            unsupported_formats = tuple(
+                format_name
+                for format_name in requested_formats
+                if format_name != "step"
+            )
+
+            if unsupported_formats:
+                raise ValueError(
+                    "Los ensamblajes identificados solo se exportan "
+                    "actualmente en STEP."
+                )
+
+            output_path = target_directory / f"{safe_name}.step"
+            self._export_assembly(body, output_path)
+            return ExportResult(
+                files=[
+                    ExportedFile(
+                        format="step",
+                        path=output_path,
+                    )
+                ]
+            )
+
+        shape = self._extract_shape(body)
 
         for format_name in requested_formats:
             output_path = target_directory / f"{safe_name}.{format_name}"
@@ -68,6 +93,21 @@ class ExportManager:
             )
 
         return ExportResult(files=exported_files)
+
+    @staticmethod
+    def _export_assembly(
+        assembly: cq.Assembly,
+        output_path: Path,
+    ) -> None:
+        try:
+            assembly.save(
+                str(output_path),
+                exportType="STEP",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"No se pudo exportar '{output_path.name}': {exc}"
+            ) from exc
 
     def export_step(
         self,
@@ -190,7 +230,7 @@ class ExportManager:
         return shape
 
     @classmethod
-    def _normalize_formats(
+    def normalize_formats(
         cls,
         formats: Iterable[str],
     ) -> tuple[str, ...]:

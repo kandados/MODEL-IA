@@ -76,8 +76,10 @@ class MechanicalPlanner:
         """
         Construye la envolvente exterior inicial.
 
-        Actualmente se añade un margen total de 4 mm a cada dimensión
-        recibida en EngineeringKnowledge.
+        Cuando existe un componente interno, las dimensiones describen el
+        objeto alojado y se añade un margen total de 4 mm. Cuando no existe
+        ningún componente, las dimensiones describen la propia pieza pedida
+        por el usuario y se respetan como cotas exteriores exactas.
         """
 
         width = knowledge.dimensions.width_mm
@@ -85,10 +87,16 @@ class MechanicalPlanner:
         height = knowledge.dimensions.height_mm
 
         if width and depth and height:
+            enclosure_margin_mm = (
+                4.0
+                if knowledge.components
+                else 0.0
+            )
+
             plan.external_bounding_box = BoundingBox(
-                width_mm=width + 4.0,
-                depth_mm=depth + 4.0,
-                height_mm=height + 4.0,
+                width_mm=width + enclosure_margin_mm,
+                depth_mm=depth + enclosure_margin_mm,
+                height_mm=height + enclosure_margin_mm,
             )
 
     def _build_component_supports(

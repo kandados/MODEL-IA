@@ -72,11 +72,30 @@ export interface ExportArtifact {
   fileName: string;
   available: boolean;
   downloadUrl?: string;
+  files?: ExportArtifactFile[];
+}
+
+export interface ExportArtifactFile {
+  partId: string;
+  label: string;
+  fileName: string;
+  downloadUrl: string;
+}
+
+export type PositionMm = [number, number, number];
+
+export interface ModelPreviewPart {
+  id: string;
+  label: string;
+  url: string;
+  assembledPositionMm: PositionMm;
+  explodedPositionMm: PositionMm;
 }
 
 export interface ModelPreview {
   format: "STL";
-  url: string;
+  url?: string;
+  parts?: ModelPreviewPart[];
 }
 
 export interface GenerationResult {
@@ -128,6 +147,27 @@ const readNumber = (
   return typeof candidate === "number" && Number.isFinite(candidate)
     ? candidate
     : undefined;
+};
+
+const readPosition = (
+  value: JsonRecord,
+  camelCaseKey: string,
+  snakeCaseKey: string,
+): PositionMm => {
+  const candidate = value[camelCaseKey] ?? value[snakeCaseKey];
+
+  if (
+    Array.isArray(candidate) &&
+    candidate.length === 3 &&
+    candidate.every(
+      (coordinate) =>
+        typeof coordinate === "number" && Number.isFinite(coordinate),
+    )
+  ) {
+    return [candidate[0], candidate[1], candidate[2]];
+  }
+
+  return [0, 0, 0];
 };
 
 const resolveUrl = (value: string, baseUrl: string): string =>
@@ -277,6 +317,45 @@ const normalizeResult = (
       "downloadUrl",
       "download_url",
     );
+    const rawFiles = Array.isArray(candidate.files) ? candidate.files : [];
+    const files = rawFiles.flatMap(
+      (rawFile, index): ExportArtifactFile[] => {
+        if (!isRecord(rawFile)) {
+          return [];
+        }
+
+        const downloadUrl = readString(
+          rawFile,
+          "downloadUrl",
+          "download_url",
+        );
+        if (!downloadUrl) {
+          return [];
+        }
+
+        return [
+          {
+            partId:
+              readString(rawFile, "partId", "part_id") ??
+              `part-${index + 1}`,
+            label: readString(rawFile, "label") ?? `Pieza ${index + 1}`,
+            fileName:
+              readString(rawFile, "fileName", "file_name") ??
+              `model_ia_${index + 1}.${format.toLowerCase()}`,
+            downloadUrl: resolveUrl(downloadUrl, apiBaseUrl),
+          },
+        ];
+      },
+    );
+
+    if (files.length === 0 && rawDownloadUrl) {
+      files.push({
+        partId: "model",
+        label: "Modelo",
+        fileName,
+        downloadUrl: resolveUrl(rawDownloadUrl, apiBaseUrl),
+      });
+    }
 
     return [
       {
@@ -285,10 +364,11 @@ const normalizeResult = (
         available:
           typeof candidate.available === "boolean"
             ? candidate.available
-            : Boolean(rawDownloadUrl),
+            : files.length > 0,
         downloadUrl: rawDownloadUrl
           ? resolveUrl(rawDownloadUrl, apiBaseUrl)
           : undefined,
+        files,
       },
     ];
   });
@@ -325,6 +405,43 @@ const normalizeResult = (
   const previewUrl = isRecord(rawPreview)
     ? readString(rawPreview, "url")
     : undefined;
+  const rawPreviewParts =
+    isRecord(rawPreview) && Array.isArray(rawPreview.parts)
+      ? rawPreview.parts
+      : [];
+  const previewParts = rawPreviewParts.flatMap(
+    (candidate, index): ModelPreviewPart[] => {
+      if (!isRecord(candidate)) {
+        return [];
+      }
+
+      const url = readString(candidate, "url");
+      if (!url) {
+        return [];
+      }
+
+      return [
+        {
+          id:
+            readString(candidate, "id") ??
+            readString(candidate, "partId", "part_id") ??
+            `part-${index + 1}`,
+          label: readString(candidate, "label") ?? `Pieza ${index + 1}`,
+          url: resolveUrl(url, apiBaseUrl),
+          assembledPositionMm: readPosition(
+            candidate,
+            "assembledPositionMm",
+            "assembled_position_mm",
+          ),
+          explodedPositionMm: readPosition(
+            candidate,
+            "explodedPositionMm",
+            "exploded_position_mm",
+          ),
+        },
+      ];
+    },
+  );
   const stlArtifact = artifacts.find(
     (artifact) => artifact.format === "STL" && artifact.downloadUrl,
   );
@@ -351,10 +468,11 @@ const normalizeResult = (
     },
     validations,
     artifacts,
-    preview: resolvedPreviewUrl
+    preview: resolvedPreviewUrl || previewParts.length > 0
       ? {
           format: "STL",
           url: resolvedPreviewUrl,
+          parts: previewParts,
         }
       : undefined,
   };

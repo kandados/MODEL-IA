@@ -40,7 +40,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { type BufferGeometry, Vector3 } from "three";
+import { Box3, type BufferGeometry, Vector3 } from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import {
   AdaptiveModelIAClient,
@@ -48,6 +48,7 @@ import {
   type ClientConnection,
   type ExportArtifact,
   type GenerationResult,
+  type ModelPreview,
   type PipelineProgressEvent,
 } from "./model-ia-client";
 import {
@@ -344,85 +345,161 @@ function EnclosureAssembly({
 
 interface ModelAssemblyProps {
   exploded: boolean;
-  previewUrl?: string;
+  preview?: ModelPreview;
 }
 
 function ModelAssembly({
   exploded,
-  previewUrl,
+  preview,
 }: ModelAssemblyProps): React.JSX.Element {
-  const [geometry, setGeometry] = useState<BufferGeometry | null>(null);
+  const [loadedParts, setLoadedParts] = useState<
+    Array<{
+      id: string;
+      label: string;
+      geometry: BufferGeometry;
+      assembledPositionMm: [number, number, number];
+      explodedPositionMm: [number, number, number];
+    }>
+  >([]);
 
   useEffect(() => {
     let cancelled = false;
-    let loadedGeometry: BufferGeometry | null = null;
+    const geometries: BufferGeometry[] = [];
+    const sourceParts =
+      preview?.parts && preview.parts.length > 0
+        ? preview.parts
+        : preview?.url
+          ? [
+              {
+                id: "model",
+                label: "Modelo",
+                url: preview.url,
+                assembledPositionMm: [0, 0, 0] as [number, number, number],
+                explodedPositionMm: [0, 0, 0] as [number, number, number],
+              },
+            ]
+          : [];
 
-    setGeometry(null);
+    setLoadedParts([]);
 
-    if (!previewUrl) {
+    if (sourceParts.length === 0) {
       return undefined;
     }
 
-    new STLLoader().load(
-      previewUrl,
-      (candidate) => {
+    const loader = new STLLoader();
+
+    void Promise.all(
+      sourceParts.map(async (part) => {
+        const candidate = await loader.loadAsync(part.url);
+        geometries.push(candidate);
+
         if (cancelled) {
           candidate.dispose();
-          return;
+          return null;
         }
 
         candidate.computeVertexNormals();
         candidate.computeBoundingBox();
 
-        const boundingBox = candidate.boundingBox;
-        if (boundingBox) {
-          const size = boundingBox.getSize(new Vector3());
-          const largestDimension = Math.max(size.x, size.y, size.z);
-          if (largestDimension > 0) {
-            const scale = 7 / largestDimension;
-            candidate.scale(scale, scale, scale);
-          }
-        }
-
-        candidate.center();
-        loadedGeometry = candidate;
-        setGeometry(candidate);
-      },
-      undefined,
-      () => {
+        return {
+          id: part.id,
+          label: part.label,
+          geometry: candidate,
+          assembledPositionMm: part.assembledPositionMm,
+          explodedPositionMm: part.explodedPositionMm,
+        };
+      }),
+    )
+      .then((parts) => {
         if (!cancelled) {
-          setGeometry(null);
+          setLoadedParts(
+            parts.filter((part) => part !== null),
+          );
         }
-      },
-    );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoadedParts([]);
+        }
+      });
 
     return () => {
       cancelled = true;
-      loadedGeometry?.dispose();
+      geometries.forEach((geometry) => geometry.dispose());
     };
-  }, [previewUrl]);
+  }, [preview]);
 
-  if (!geometry) {
+  const layout = useMemo(() => {
+    if (loadedParts.length === 0) {
+      return null;
+    }
+
+    const bounds = new Box3();
+    bounds.makeEmpty();
+
+    const parts = loadedParts.map((part) => {
+      const positionMm = exploded
+        ? part.explodedPositionMm
+        : part.assembledPositionMm;
+      const position = new Vector3(...positionMm);
+      const partBounds = part.geometry.boundingBox?.clone();
+
+      if (partBounds) {
+        partBounds.translate(position);
+        bounds.union(partBounds);
+      }
+
+      return { ...part, position };
+    });
+
+    if (bounds.isEmpty()) {
+      return null;
+    }
+
+    const size = bounds.getSize(new Vector3());
+    const center = bounds.getCenter(new Vector3());
+    const largestDimension = Math.max(size.x, size.y, size.z);
+
+    return {
+      parts,
+      center,
+      scale: largestDimension > 0 ? 7 / largestDimension : 1,
+    };
+  }, [exploded, loadedParts]);
+
+  if (!layout) {
     return <EnclosureAssembly exploded={exploded} />;
   }
 
   return (
-    <group rotation={[-Math.PI / 2, 0, 0]}>
-      <mesh
-        geometry={geometry}
-        castShadow
-        receiveShadow
-      >
-        <meshStandardMaterial
-          color="#718491"
-          metalness={0.28}
-          roughness={0.48}
-        />
-        <Edges
-          threshold={20}
-          color="#74e3f8"
-        />
-      </mesh>
+    <group
+      rotation={[-Math.PI / 2, 0, 0]}
+      scale={layout.scale}
+    >
+      {layout.parts.map((part, index) => (
+        <mesh
+          key={part.id}
+          geometry={part.geometry}
+          position={[
+            part.position.x - layout.center.x,
+            part.position.y - layout.center.y,
+            part.position.z - layout.center.z,
+          ]}
+          castShadow
+          receiveShadow
+          name={part.label}
+        >
+          <meshStandardMaterial
+            color={index === 0 ? "#718491" : "#8aa5b2"}
+            metalness={0.28}
+            roughness={0.48}
+          />
+          <Edges
+            threshold={20}
+            color="#74e3f8"
+          />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -432,7 +509,7 @@ interface ViewerSceneProps {
   exploded: boolean;
   distance: number;
   resetVersion: number;
-  previewUrl?: string;
+  preview?: ModelPreview;
 }
 
 function ViewerScene({
@@ -440,7 +517,7 @@ function ViewerScene({
   exploded,
   distance,
   resetVersion,
-  previewUrl,
+  preview,
 }: ViewerSceneProps): React.JSX.Element {
   return (
     <Canvas
@@ -496,7 +573,7 @@ function ViewerScene({
       />
       <ModelAssembly
         exploded={exploded}
-        previewUrl={previewUrl}
+        preview={preview}
       />
 
       <Grid
@@ -967,7 +1044,10 @@ function Inspector({
             type="button"
             disabled={!artifact.available}
             onClick={() => void onExport(artifact.format)}
-            title={artifact.fileName}
+            title={
+              artifact.files?.map((file) => file.fileName).join(" + ") ??
+              artifact.fileName
+            }
           >
             {artifact.format}
           </button>
@@ -1560,33 +1640,63 @@ export default function App(): React.JSX.Element {
 
   const downloadArtifact = async (
     artifact: ExportArtifact,
-  ): Promise<void> => {
-    if (!artifact.downloadUrl) {
+  ): Promise<number> => {
+    const files =
+      artifact.files && artifact.files.length > 0
+        ? artifact.files
+        : artifact.downloadUrl
+          ? [
+              {
+                partId: "model",
+                label: "Modelo",
+                fileName: artifact.fileName,
+                downloadUrl: artifact.downloadUrl,
+              },
+            ]
+          : [];
+
+    if (files.length === 0) {
       setProjectNotice(
         activeProject.id,
         "La exportación estará disponible al conectar el backend",
       );
-      return;
+      return 0;
     }
 
     setProjectNotice(
       activeProject.id,
-      `Descargando ${artifact.fileName}...`,
+      files.length === 1
+        ? `Preparando ${files[0].fileName}...`
+        : `Preparando ${files.length} archivos ${artifact.format}...`,
     );
 
-    const response = await fetch(artifact.downloadUrl);
-    if (!response.ok) {
-      throw new Error(`No se pudo descargar ${artifact.fileName}`);
+    if (window.modelIADesktop?.saveExportFiles) {
+      const result = await window.modelIADesktop.saveExportFiles(
+        files.map((file) => ({
+          fileName: file.fileName,
+          downloadUrl: file.downloadUrl,
+        })),
+      );
+      return result.canceled ? 0 : result.savedFileNames.length;
     }
 
-    const blobUrl = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = blobUrl;
-    link.download = artifact.fileName;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    for (const file of files) {
+      const response = await fetch(file.downloadUrl);
+      if (!response.ok) {
+        throw new Error(`No se pudo descargar ${file.fileName}`);
+      }
+
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = file.fileName;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    }
+
+    return files.length;
   };
 
   const handleExport = async (
@@ -1598,10 +1708,15 @@ export default function App(): React.JSX.Element {
 
     if (artifact) {
       try {
-        await downloadArtifact(artifact);
+        const downloadedFiles = await downloadArtifact(artifact);
+        if (downloadedFiles === 0) {
+          return;
+        }
         setProjectNotice(
           activeProject.id,
-          `${artifact.fileName} descargado`,
+          downloadedFiles === 1
+            ? `${artifact.fileName} descargado`
+            : `${downloadedFiles} archivos ${artifact.format} descargados`,
         );
       } catch (error) {
         setProjectNotice(
@@ -1682,7 +1797,7 @@ export default function App(): React.JSX.Element {
                 exploded={exploded}
                 distance={cameraDistance}
                 resetVersion={resetVersion}
-                previewUrl={activeProject.result.preview?.url}
+                preview={activeProject.result.preview}
               />
 
               <ViewerToolbar

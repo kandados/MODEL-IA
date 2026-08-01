@@ -39,5 +39,12 @@ contextBridge.exposeInMainWorld(
         "model-ia:projects:remove-data",
         projectId,
       ) as Promise<boolean>,
+    saveExportFiles: (
+      files: Array<{ fileName: string; downloadUrl: string }>,
+    ): Promise<unknown> =>
+      ipcRenderer.invoke(
+        "model-ia:exports:save",
+        files,
+      ) as Promise<unknown>,
   }),
 );

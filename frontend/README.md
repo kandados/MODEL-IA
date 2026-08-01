@@ -65,6 +65,35 @@ http://127.0.0.1:8000/api/v1
 
 Puede cambiarse en desarrollo mediante `VITE_MODEL_IA_API_URL`.
 
+## Ejecutar la integración real
+
+La API se inicia desde la raíz de Model-IA, con el entorno virtual activo:
+
+```bash
+cd ~/Model-IA
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn src.api:app --reload
+```
+
+La comprobación directa del servicio debe devolver un JSON con `status: ok`:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+```
+
+En una segunda terminal se inicia Electron:
+
+```bash
+cd ~/Model-IA/frontend
+npm run dev
+```
+
+Electron mostrará `Backend conectado`. Cada petición se ejecuta en segundo
+plano y FastAPI transmite las fases por WebSocket. Los resultados se guardan
+en una carpeta aislada por generación bajo `projects/generated/api/`; esta
+carpeta es local y Git no la registra.
+
 ## Contrato API v1
 
 ### Estado
@@ -92,8 +121,7 @@ Content-Type: application/json
 }
 ```
 
-El backend puede devolver directamente el resultado final o aceptar un trabajo
-asíncrono:
+El backend acepta un trabajo asíncrono y devuelve:
 
 ```json
 {
@@ -148,22 +176,53 @@ El último evento contiene el resultado:
     "artifacts": [
       {
         "format": "STL",
-        "file_name": "enclosure.stl",
+        "file_name": "enclosure_base.stl + enclosure_lid.stl",
         "available": true,
-        "download_url": "/api/v1/generations/gen_123/files/enclosure.stl"
+        "files": [
+          {
+            "part_id": "base",
+            "label": "Base",
+            "file_name": "enclosure_base.stl",
+            "download_url": "/api/v1/generations/gen_123/files/enclosure_base.stl"
+          },
+          {
+            "part_id": "lid",
+            "label": "Tapa",
+            "file_name": "enclosure_lid.stl",
+            "download_url": "/api/v1/generations/gen_123/files/enclosure_lid.stl"
+          }
+        ]
       }
     ],
     "preview": {
       "format": "STL",
-      "url": "/api/v1/generations/gen_123/files/enclosure.stl"
+      "parts": [
+        {
+          "id": "base",
+          "label": "Base",
+          "url": "/api/v1/generations/gen_123/files/enclosure_base.stl",
+          "assembled_position_mm": [0, 0, 0],
+          "exploded_position_mm": [-107.5, 0, 0]
+        },
+        {
+          "id": "lid",
+          "label": "Tapa",
+          "url": "/api/v1/generations/gen_123/files/enclosure_lid.stl",
+          "assembled_position_mm": [0, 0, 31.2],
+          "exploded_position_mm": [107.5, 0, 0]
+        }
+      ]
     }
   }
 }
 ```
 
-El frontend usa el STL real como vista previa y los enlaces de los artefactos
-para descargar STEP, STL y 3MF. FastAPI debe permitir CORS desde el servidor de
-desarrollo de Vite (`http://localhost:5173`) y desde la aplicación Electron.
+El frontend carga los STL de base y tapa como piezas independientes. El botón
+de vista explosionada alterna entre su disposición separada y el ensamblaje.
+STEP contiene los componentes identificados, STL descarga un archivo por pieza
+y 3MF coloca las piezas una al lado de la otra para laminar. FastAPI permite
+CORS desde el servidor de desarrollo de Vite (`http://localhost:5173`) y desde
+la aplicación Electron.
 
 ## Estado actual del frontend
 
@@ -174,8 +233,9 @@ desarrollo de Vite (`http://localhost:5173`) y desde la aplicación Electron.
 - Vista normal y explosionada.
 - Controles de cámara, rotación y pantalla completa.
 - Cliente adaptativo: FastAPI/WebSocket real con simulador de respaldo.
-- Carga automática del STL generado en el visor Three.js.
-- Descarga real de STEP, STL y 3MF cuando el backend proporciona sus URL.
+- Carga multipieza de base y tapa en el visor Three.js.
+- Vista ensamblada y explosionada también para geometría real.
+- STEP ensamblado, STL por pieza y 3MF preparado para impresión.
 - Persistencia local de proyectos y borradores entre reinicios.
 - Renombrado y eliminación segura de proyectos y sus adjuntos locales.
 - Historial de conversación independiente por proyecto.
@@ -183,5 +243,5 @@ desarrollo de Vite (`http://localhost:5173`) y desde la aplicación Electron.
 - Especificaciones, validaciones y formatos de salida.
 
 La transferencia del contenido de los adjuntos a FastAPI sigue pendiente; el
-contrato actual envía sus nombres. El backend Python existente no ha sido
-modificado.
+contrato actual envía sus nombres. La API real, el WebSocket, la generación
+CadQuery, la vista previa STL y las descargas STEP/STL/3MF ya están conectados.

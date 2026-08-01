@@ -7,6 +7,7 @@ from typing import Iterable
 import cadquery as cq
 
 from src.cad.enclosure_builder import EnclosureBuilder
+from src.cad.enclosure_specification import EnclosureSpecification
 from src.cad.export_manager import ExportManager, ExportResult
 from src.cad.fastening_builder import FasteningBuilder
 from src.cad.fillet_builder import FilletBuilder
@@ -23,6 +24,7 @@ from src.models.mechanical_plan import MechanicalPlan
 @dataclass(slots=True)
 class CADGenerationResult:
     assembly: cq.Workplane
+    print_layout: cq.Workplane
     base: cq.Workplane
     lid: cq.Workplane
     supports: cq.Workplane
@@ -92,6 +94,7 @@ class CADGenerator:
         output_directory: str | Path | None = None,
     ) -> CADGenerationResult:
         self._validate_plan_input(plan)
+        specification = EnclosureSpecification.from_plan(plan)
 
         base = self.enclosure_builder.build_base(plan)
         lid = self.enclosure_builder.build_lid(plan)
@@ -120,9 +123,23 @@ class CADGenerator:
             plan,
         )
 
+        assembled_lid = lid.translate(
+            (
+                0.0,
+                0.0,
+                specification.base_height_mm,
+            )
+        )
+
         assembly = self._make_compound(
             base,
-            lid,
+            assembled_lid,
+        )
+
+        print_layout = self._make_print_layout(
+            base=base,
+            lid=lid,
+            width_mm=specification.external_box.width_mm,
         )
 
         validation = self._validate_generated_geometry(
@@ -135,29 +152,51 @@ class CADGenerator:
         exports: dict[str, ExportResult] | None = None
 
         if export:
-            exports = {
-                "assembly": self.export_manager.export(
-                    assembly,
+            requested_formats = self.export_manager.normalize_formats(
+                formats
+            )
+            exports = {}
+
+            if "step" in requested_formats:
+                exports["assembly"] = self.export_manager.export(
+                    self._make_named_assembly(
+                        base=base,
+                        lid=lid,
+                        lid_height_offset_mm=(
+                            specification.base_height_mm
+                        ),
+                        name=file_name,
+                    ),
                     file_name,
-                    formats,
+                    ("step",),
                     output_directory,
-                ),
-                "base": self.export_manager.export(
+                )
+
+            if "stl" in requested_formats:
+                exports["base"] = self.export_manager.export(
                     base,
                     f"{file_name}_base",
-                    formats,
+                    ("stl",),
                     output_directory,
-                ),
-                "lid": self.export_manager.export(
+                )
+                exports["lid"] = self.export_manager.export(
                     lid,
                     f"{file_name}_lid",
-                    formats,
+                    ("stl",),
                     output_directory,
-                ),
-            }
+                )
+
+            if "3mf" in requested_formats:
+                exports["print_layout"] = self.export_manager.export(
+                    print_layout,
+                    f"{file_name}_print_layout",
+                    ("3mf",),
+                    output_directory,
+                )
 
         return CADGenerationResult(
             assembly=assembly,
+            print_layout=print_layout,
             base=base,
             lid=lid,
             supports=supports,
@@ -271,6 +310,48 @@ class CADGenerator:
         return cq.Workplane("XY").newObject(
             [compound]
         )
+
+    @staticmethod
+    def _make_print_layout(
+        *,
+        base: cq.Workplane,
+        lid: cq.Workplane,
+        width_mm: float,
+        gap_mm: float = 5.0,
+    ) -> cq.Workplane:
+        """Coloca las piezas separadas y listas para laminar en 3MF."""
+
+        center_offset_mm = (width_mm + gap_mm) / 2.0
+
+        return CADGenerator._make_compound(
+            base.translate((-center_offset_mm, 0.0, 0.0)),
+            lid.translate((center_offset_mm, 0.0, 0.0)),
+        )
+
+    @staticmethod
+    def _make_named_assembly(
+        *,
+        base: cq.Workplane,
+        lid: cq.Workplane,
+        lid_height_offset_mm: float,
+        name: str,
+    ) -> cq.Assembly:
+        """Crea un STEP con base y tapa como componentes identificados."""
+
+        assembly = cq.Assembly(name=name)
+        assembly.add(base, name="base")
+        assembly.add(
+            lid,
+            name="lid",
+            loc=cq.Location(
+                cq.Vector(
+                    0.0,
+                    0.0,
+                    lid_height_offset_mm,
+                )
+            ),
+        )
+        return assembly
 
     @staticmethod
     def _extract_shape(

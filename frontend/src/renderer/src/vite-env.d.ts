@@ -1,5 +1,15 @@
 /// <reference types="vite/client" />
 
+interface DesktopExportFile {
+  fileName: string;
+  downloadUrl: string;
+}
+
+interface DesktopExportSaveResult {
+  canceled: boolean;
+  savedFileNames: string[];
+}
+
 interface ModelIADesktopBridge {
   platform: string;
   loadWorkspace: () => Promise<unknown>;
@@ -14,6 +24,9 @@ interface ModelIADesktopBridge {
     storedName: string,
   ) => Promise<boolean>;
   removeProjectData: (projectId: string) => Promise<boolean>;
+  saveExportFiles: (
+    files: DesktopExportFile[],
+  ) => Promise<DesktopExportSaveResult>;
 }
 
 interface Window {
