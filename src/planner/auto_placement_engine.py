@@ -1,8 +1,7 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, sqrt
-
 from src.cad.geometric_reference_system import (
     AxisAlignedVolume,
     GeometricReferenceSystem,
@@ -95,17 +94,18 @@ class AutoPlacementEngine:
     """
     Motor básico de colocación automática.
 
-    Estrategia inicial:
+    Estrategia de colocación:
 
     1. Ordenar componentes por superficie descendente.
-    2. Intentar colocarlos por filas.
+    2. Generar posiciones candidatas junto a los límites disponibles.
     3. Probar orientación de 0° y 90°.
-    4. Respetar el interior útil.
-    5. Evitar solapamientos.
-    6. Producir ComponentPlacement compatibles con PlacementPlanner.
+    4. Descartar posiciones fuera del interior útil.
+    5. Descartar colisiones tridimensionales.
+    6. Puntuar las soluciones por compacidad y posición.
+    7. Producir ComponentPlacement compatibles con PlacementPlanner.
 
-    Esta versión busca una solución válida y reproducible.
-    Todavía no intenta encontrar la solución global óptima.
+    Esta versión compara varias alternativas locales para obtener una
+    distribución más compacta y robusta que el recorrido simple por filas.
     """
 
     DEFAULT_COMPONENT_GAP_MM = 2.0
@@ -125,7 +125,6 @@ class AutoPlacementEngine:
         )
 
         usable = reference_system.usable_interior
-
         issues = self._validate_items(items)
 
         if issues:
@@ -145,34 +144,12 @@ class AutoPlacementEngine:
         placed_items: list[AutoPlacedItem] = []
         occupied_volumes: list[AxisAlignedVolume] = []
 
-        cursor_x_mm = usable.min_x_mm
-        cursor_y_mm = usable.min_y_mm
-        current_row_depth_mm = 0.0
-
         for item in ordered_items:
-            candidate = self._find_candidate(
+            candidate = self._find_best_candidate(
                 item=item,
                 usable=usable,
                 occupied_volumes=occupied_volumes,
-                start_x_mm=cursor_x_mm,
-                start_y_mm=cursor_y_mm,
             )
-
-            if candidate is None:
-                cursor_x_mm = usable.min_x_mm
-                cursor_y_mm += (
-                    current_row_depth_mm
-                    + self.DEFAULT_COMPONENT_GAP_MM
-                )
-                current_row_depth_mm = 0.0
-
-                candidate = self._find_candidate(
-                    item=item,
-                    usable=usable,
-                    occupied_volumes=occupied_volumes,
-                    start_x_mm=cursor_x_mm,
-                    start_y_mm=cursor_y_mm,
-                )
 
             if candidate is None:
                 issues.append(
@@ -194,7 +171,6 @@ class AutoPlacementEngine:
             )
 
             placements.append(placement)
-
             placed_items.append(
                 AutoPlacedItem(
                     item=item,
@@ -202,20 +178,7 @@ class AutoPlacementEngine:
                     occupied_volume=candidate.occupied_volume,
                 )
             )
-
-            occupied_volumes.append(
-                candidate.occupied_volume
-            )
-
-            cursor_x_mm = (
-                candidate.occupied_volume.max_x_mm
-                + self.DEFAULT_COMPONENT_GAP_MM
-            )
-
-            current_row_depth_mm = max(
-                current_row_depth_mm,
-                candidate.occupied_volume.depth_mm,
-            )
+            occupied_volumes.append(candidate.occupied_volume)
 
         return AutoPlacementResult(
             placements=placements,
@@ -224,6 +187,7 @@ class AutoPlacementEngine:
         )
 
     def require_valid(
+
         self,
         plan: MechanicalPlan,
         items: list[AutoPlacementItem],
@@ -257,7 +221,50 @@ class AutoPlacementEngine:
             f"{descriptions}"
         )
 
-    def _find_candidate(
+    def _find_best_candidate(
+        self,
+        *,
+        item: AutoPlacementItem,
+        usable: AxisAlignedVolume,
+        occupied_volumes: list[AxisAlignedVolume],
+    ) -> _PlacementCandidate | None:
+        """
+        Genera y compara todas las posiciones candidatas locales.
+        """
+
+        candidates: list[_PlacementCandidate] = []
+
+        for start_x_mm, start_y_mm in self._candidate_start_positions(
+            usable=usable,
+            occupied_volumes=occupied_volumes,
+        ):
+            for rotation_z_deg in self._rotation_options(item):
+                candidate = self._build_candidate(
+                    item=item,
+                    usable=usable,
+                    occupied_volumes=occupied_volumes,
+                    start_x_mm=start_x_mm,
+                    start_y_mm=start_y_mm,
+                    rotation_z_deg=rotation_z_deg,
+                )
+
+                if candidate is not None:
+                    candidates.append(candidate)
+
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda candidate: self._candidate_score(
+                candidate=candidate,
+                usable=usable,
+                occupied_volumes=occupied_volumes,
+                item=item,
+            ),
+        )
+
+    def _build_candidate(
         self,
         *,
         item: AutoPlacementItem,
@@ -265,78 +272,149 @@ class AutoPlacementEngine:
         occupied_volumes: list[AxisAlignedVolume],
         start_x_mm: float,
         start_y_mm: float,
+        rotation_z_deg: float,
     ) -> _PlacementCandidate | None:
+        dimensions = self._rotated_dimensions(
+            dimensions=item.dimensions,
+            rotation_z_deg=rotation_z_deg,
+        )
+
+        total_width_mm = (
+            dimensions.width_mm
+            + 2.0 * item.clearance_mm
+        )
+        total_depth_mm = (
+            dimensions.depth_mm
+            + 2.0 * item.clearance_mm
+        )
+
+        center_x_mm = start_x_mm + total_width_mm / 2.0
+        center_y_mm = start_y_mm + total_depth_mm / 2.0
+
+        component_origin_z_mm = (
+            usable.min_z_mm
+            + item.elevation_mm
+            + item.clearance_mm
+        )
+
+        occupied_volume = AxisAlignedVolume(
+            min_x_mm=start_x_mm,
+            max_x_mm=start_x_mm + total_width_mm,
+            min_y_mm=start_y_mm,
+            max_y_mm=start_y_mm + total_depth_mm,
+            min_z_mm=(
+                component_origin_z_mm
+                - item.clearance_mm
+            ),
+            max_z_mm=(
+                component_origin_z_mm
+                + dimensions.height_mm
+                + item.clearance_mm
+            ),
+        )
+
+        if not self._volume_contains_volume(
+            container=usable,
+            content=occupied_volume,
+        ):
+            return None
+
+        if self._collides_with_any(
+            candidate=occupied_volume,
+            occupied_volumes=occupied_volumes,
+        ):
+            return None
+
+        return _PlacementCandidate(
+            rotation_z_deg=rotation_z_deg,
+            rotated_dimensions=dimensions,
+            center_x_mm=center_x_mm,
+            center_y_mm=center_y_mm,
+            occupied_volume=occupied_volume,
+        )
+
+    def _candidate_start_positions(
+        self,
+        *,
+        usable: AxisAlignedVolume,
+        occupied_volumes: list[AxisAlignedVolume],
+    ) -> list[tuple[float, float]]:
         """
-        Prueba las orientaciones permitidas desde una posición inicial.
+        Crea esquinas candidatas a partir de los límites del interior y
+        de los bordes derechos y superiores de los componentes colocados.
         """
 
-        for rotation_z_deg in self._rotation_options(item):
-            dimensions = self._rotated_dimensions(
-                dimensions=item.dimensions,
-                rotation_z_deg=rotation_z_deg,
+        x_positions = {usable.min_x_mm}
+        y_positions = {usable.min_y_mm}
+
+        for occupied in occupied_volumes:
+            x_positions.add(
+                occupied.max_x_mm
+                + self.DEFAULT_COMPONENT_GAP_MM
+            )
+            y_positions.add(
+                occupied.max_y_mm
+                + self.DEFAULT_COMPONENT_GAP_MM
             )
 
-            total_width_mm = (
-                dimensions.width_mm
-                + 2.0 * item.clearance_mm
-            )
+        positions = {
+            (x_mm, y_mm)
+            for x_mm in x_positions
+            for y_mm in y_positions
+            if x_mm <= usable.max_x_mm
+            and y_mm <= usable.max_y_mm
+        }
 
-            total_depth_mm = (
-                dimensions.depth_mm
-                + 2.0 * item.clearance_mm
-            )
+        return sorted(
+            positions,
+            key=lambda position: (position[1], position[0]),
+        )
 
-            center_x_mm = (
-                start_x_mm
-                + total_width_mm / 2.0
-            )
+    def _candidate_score(
+        self,
+        *,
+        candidate: _PlacementCandidate,
+        usable: AxisAlignedVolume,
+        occupied_volumes: list[AxisAlignedVolume],
+        item: AutoPlacementItem,
+    ) -> tuple[float, float, float, float]:
+        """
+        Menor puntuación significa una distribución más compacta.
+        """
 
-            center_y_mm = (
-                start_y_mm
-                + total_depth_mm / 2.0
-            )
+        volumes = [
+            *occupied_volumes,
+            candidate.occupied_volume,
+        ]
 
-            component_floor_z_mm = (
-                usable.min_z_mm
-                + item.elevation_mm
-            )
+        used_max_x_mm = max(
+            volume.max_x_mm
+            for volume in volumes
+        )
+        used_max_y_mm = max(
+            volume.max_y_mm
+            for volume in volumes
+        )
 
-            occupied_volume = AxisAlignedVolume(
-                min_x_mm=center_x_mm - total_width_mm / 2.0,
-                max_x_mm=center_x_mm + total_width_mm / 2.0,
-                min_y_mm=center_y_mm - total_depth_mm / 2.0,
-                max_y_mm=center_y_mm + total_depth_mm / 2.0,
-                min_z_mm=component_floor_z_mm,
-                max_z_mm=(
-                    component_floor_z_mm
-                    + dimensions.height_mm
-                    + item.clearance_mm
-                ),
-            )
+        used_width_mm = used_max_x_mm - usable.min_x_mm
+        used_depth_mm = used_max_y_mm - usable.min_y_mm
+        bounding_area_mm2 = used_width_mm * used_depth_mm
 
-            if not self._volume_contains_volume(
-                container=usable,
-                content=occupied_volume,
-            ):
-                continue
+        preferred_rotation_penalty = 0.0
+        if item.preferred_rotation_z_deg is not None:
+            preferred = item.preferred_rotation_z_deg % 360.0
+            if candidate.rotation_z_deg != preferred:
+                preferred_rotation_penalty = 1.0
 
-            if self._collides_with_any(
-                candidate=occupied_volume,
-                occupied_volumes=occupied_volumes,
-            ):
-                continue
-
-            return _PlacementCandidate(
-                rotation_z_deg=rotation_z_deg,
-                rotated_dimensions=dimensions,
-                center_x_mm=center_x_mm,
-                center_y_mm=center_y_mm,
-                occupied_volume=occupied_volume,
-            )
-
-        return None
+        return (
+            bounding_area_mm2,
+            used_max_y_mm,
+            used_max_x_mm,
+            preferred_rotation_penalty,
+        )
 
     def _candidate_to_placement(
+
         self,
         *,
         item: AutoPlacementItem,
@@ -364,7 +442,10 @@ class AutoPlacementEngine:
                     candidate.center_y_mm
                     - floor_center.y_mm
                 ),
-                z_mm=item.elevation_mm,
+                z_mm=(
+                    item.elevation_mm
+                    + item.clearance_mm
+                ),
             ),
             dimensions=item.dimensions,
             rotation_z_deg=candidate.rotation_z_deg,
